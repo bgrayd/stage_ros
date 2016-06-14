@@ -764,7 +764,7 @@ main(int argc, char** argv)
 
     // TODO: get rid of this fixed-duration sleep, using some Stage builtin
     // PauseUntilNextUpdate() functionality.
-    ros::WallRate r(10.0);
+    ros::WallRate r(100.0);
     while(ros::ok() && !sn.world->TestQuit())
     {
         if(gui)
