@@ -32,6 +32,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <signal.h>
+#include <pthread.h> 
+
 
 
 // libstage
@@ -45,6 +47,7 @@
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/image_encodings.h>
 #include <sensor_msgs/CameraInfo.h>
+#include "std_msgs/String.h"
 #include <nav_msgs/Odometry.h>
 #include <geometry_msgs/Twist.h>
 #include <rosgraph_msgs/Clock.h>
@@ -126,6 +129,9 @@ private:
     const char *mapName(const char *name, size_t robotID, Stg::Model* mod) const;
     const char *mapName(const char *name, size_t robotID, size_t deviceID, Stg::Model* mod) const;
 
+    //world file
+    const char* fname;
+
     tf::TransformBroadcaster tf;
 
     // Last time that we received a velocity command
@@ -166,6 +172,10 @@ public:
 
     // The main simulator object
     Stg::World* world;
+
+    ros::Subscriber sub;
+    void testCallBack(const std_msgs::String::ConstPtr& msg);
+    pthread_mutex_t reload_mutex;
 };
 
 // since stageros is single-threaded, this is OK. revisit if that changes!
@@ -266,7 +276,49 @@ StageNode::cmdvelReceived(int idx, const boost::shared_ptr<geometry_msgs::Twist 
     this->base_last_cmd = this->sim_time;
 }
 
-StageNode::StageNode(int argc, char** argv, bool gui, const char* fname, bool use_model_names)
+void StageNode::testCallBack(const std_msgs::String::ConstPtr& msg)
+{
+    pthread_mutex_lock(& this->reload_mutex);
+
+    Stg::World* oldWorld;
+    
+    this->world->Stop();
+    for (std::vector<StageRobot const*>::iterator r = this->robotmodels_.begin(); r != this->robotmodels_.end(); ++r)
+        delete *r;
+    while(!this->robotmodels_.empty())
+        this->robotmodels_.pop_back();
+    for (std::vector<Stg::ModelCamera *>::iterator r = this->cameramodels.begin(); r != this->cameramodels.end(); ++r)
+        delete *r;
+    while(!this->cameramodels.empty())
+        this->cameramodels.pop_back();
+    for (std::vector<Stg::ModelRanger *>::iterator r = this->lasermodels.begin(); r != this->lasermodels.end(); ++r)
+        delete *r;
+    while(!this->lasermodels.empty())
+        this->lasermodels.pop_back();
+    for (std::vector<Stg::ModelPosition *>::iterator r = this->positionmodels.begin(); r != this->positionmodels.end(); ++r)
+        delete *r;
+    while(!this->positionmodels.empty())
+        this->positionmodels.pop_back();
+
+    //delete this->world;
+    //oldWorld = &(*(this->world));
+    this->world = new Stg::World();
+    this->world->Load("/home/billy/catkin_ws/src/ai_labs/world/house2.world");//this->fname);
+    this->world->Reload();
+
+    // delete oldWorld;
+    // this->world = tempWorld;
+
+    this->world->AddUpdateCallback((Stg::world_callback_t)s_update, this);
+    this->world->ForEachDescendant((Stg::model_callback_t)ghfunc, this);
+    
+    this->SubscribeModels();
+    this->world->Start();
+    
+    pthread_mutex_unlock(& this->reload_mutex);
+}
+
+StageNode::StageNode(int argc, char** argv, bool gui, const char* fname, bool use_model_names):reload_mutex()
 {
     this->use_model_names = use_model_names;
     this->sim_time.fromSec(0.0);
@@ -279,7 +331,10 @@ StageNode::StageNode(int argc, char** argv, bool gui, const char* fname, bool us
 
     if(!localn.getParam("is_depth_canonical", isDepthCanonical))
         isDepthCanonical = true;
-
+    
+    this->fname = fname;
+    this->sub = this->n_.subscribe("reload_world", 1000, &StageNode::testCallBack, this);
+    pthread_mutex_init(&(this->reload_mutex), NULL);
 
     // We'll check the existence of the world file, because libstage doesn't
     // expose its failure to open it.  Could go further with checks (e.g., is
@@ -385,7 +440,7 @@ StageNode::SubscribeModels()
     clock_pub_ = n_.advertise<rosgraph_msgs::Clock>("/clock", 10);
 
     // advertising reset service
-    reset_srv_ = n_.advertiseService("reset_positions", &StageNode::cb_reset_srv, this);
+    // reset_srv_ = n_.advertiseService("reset_positions", &StageNode::cb_reset_srv, this);
 
     return(0);
 }
@@ -399,7 +454,11 @@ StageNode::~StageNode()
 bool
 StageNode::UpdateWorld()
 {
-    return this->world->UpdateAll();
+    pthread_mutex_lock(&(this->reload_mutex));
+    bool valueToReturn = this->world->UpdateAll();
+    pthread_mutex_unlock(&(this->reload_mutex));
+    return valueToReturn;
+    // return this->world->UpdateAll();
 }
 
 void
@@ -764,7 +823,7 @@ main(int argc, char** argv)
 
     // TODO: get rid of this fixed-duration sleep, using some Stage builtin
     // PauseUntilNextUpdate() functionality.
-    ros::WallRate r(100.0);
+    ros::WallRate r(10.0);
     while(ros::ok() && !sn.world->TestQuit())
     {
         if(gui)
